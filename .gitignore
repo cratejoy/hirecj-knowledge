@@ -62,4 +62,8 @@ htmlcov/
 # Distribution / packaging
 dist/
 build/
-*.spec
+*.spec# Ignore large media files
+content/audio/
+content/downloaded/
+content/chunks/
+content/transcribing/
