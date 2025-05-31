@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import feedparser
 import requests
+import yt_dlp
 from openai import OpenAI
 from pydub import AudioSegment
 from dotenv import load_dotenv
@@ -182,6 +183,8 @@ class ContentProcessor:
             if content_type == 'rss':
                 limit = data.get('limit')
                 self._process_rss(url, item_id, limit)
+            elif content_type == 'youtube':
+                self._process_youtube(url, item_id)
             else:
                 raise NotImplementedError(f"Type {content_type} not yet supported")
         finally:
@@ -318,6 +321,108 @@ class ContentProcessor:
         
         # Process audio through chunking and transcription
         self._process_audio(audio_dir / 'audio.mp3', episode_id, metadata)
+    
+    def _process_youtube(self, youtube_url: str, video_id: str):
+        """Process YouTube video - download and extract audio"""
+        print(f"  🎥 Processing YouTube video: {youtube_url}")
+        
+        # Download video
+        download_dir = self.base_dir / 'downloaded' / video_id
+        download_dir.mkdir(exist_ok=True)
+        
+        print(f"  💾 Downloading video...")
+        
+        ydl_opts = {
+            'outtmpl': str(download_dir / 'video.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            # Get best quality audio
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        }
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(youtube_url, download=True)
+                
+                # Get video metadata
+                title = info.get('title', 'Unknown Video')
+                channel = info.get('uploader', 'Unknown Channel')
+                upload_date = info.get('upload_date', 'Unknown')
+                duration = info.get('duration', 0)
+                
+                print(f"  📺 Title: {title}")
+                print(f"  👤 Channel: {channel}")
+                print(f"  📅 Upload date: {upload_date}")
+                print(f"  ⏱️  Duration: {duration//60}:{duration%60:02d}")
+                
+                # Save metadata
+                metadata = {
+                    'url': youtube_url,
+                    'title': title,
+                    'channel': channel,
+                    'upload_date': upload_date,
+                    'duration': duration,
+                    'download_date': datetime.now().isoformat()
+                }
+                
+                with open(download_dir / 'metadata.json', 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                
+        except Exception as e:
+            print(f"  ❌ Failed to download video: {str(e)}")
+            raise
+        
+        # Find the downloaded audio file
+        audio_files = list(download_dir.glob('*.mp3'))
+        if not audio_files:
+            # If no mp3, look for the video file and extract audio
+            video_files = list(download_dir.glob('video.*'))
+            if not video_files:
+                raise Exception("No video or audio file found after download")
+            
+            video_file = video_files[0]
+            print(f"  🎵 Extracting audio from video...")
+            
+            audio_file = download_dir / 'audio.mp3'
+            self._extract_audio_from_video(video_file, audio_file)
+        else:
+            audio_file = audio_files[0]
+            # Rename to standard name
+            new_audio_file = download_dir / 'audio.mp3'
+            audio_file.rename(new_audio_file)
+            audio_file = new_audio_file
+        
+        print(f"  ✅ Audio ready: {audio_file.stat().st_size:,} bytes")
+        
+        # Copy to audio directory
+        audio_dir = self.base_dir / 'audio' / video_id
+        audio_dir.mkdir(exist_ok=True)
+        shutil.copy2(audio_file, audio_dir / 'audio.mp3')
+        
+        # Process audio through chunking and transcription
+        self._process_audio(audio_dir / 'audio.mp3', video_id, metadata)
+    
+    def _extract_audio_from_video(self, video_path: Path, audio_path: Path):
+        """Extract audio from video using ffmpeg"""
+        cmd = [
+            'ffmpeg', '-i', str(video_path),
+            '-vn',  # No video
+            '-acodec', 'mp3',
+            '-ab', '192k',  # Audio bitrate
+            '-ar', '44100',  # Sample rate
+            '-y',  # Overwrite output
+            str(audio_path)
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise Exception(f"ffmpeg failed: {result.stderr}")
     
     def _process_audio(self, audio_file: Path, item_id: str, metadata: dict):
         """Chunk and transcribe audio"""
