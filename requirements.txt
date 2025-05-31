@@ -1,24 +1,31 @@
 # LightRAG Video Transcripts Demo Requirements
 
 # Core LightRAG dependencies
-aiohttp>=3.8.0
-configparser>=5.3.0
+aiohttp==3.10.10       # Latest stable version
+configparser==7.1.0    # Backport of ConfigParser
 future>=0.18.3
-pandas>=2.0.0
+pandas==2.2.3          # Latest stable version
 pipmaster>=0.2.0
-pydantic>=2.0.0
+pydantic==2.9.2        # Latest v2 stable
 python-dotenv>=1.0.0
 pyuca>=1.2
 setuptools>=65.0.0
-tenacity>=8.2.0
-tiktoken>=0.5.0
-xlsxwriter>=3.1.0
+tenacity==9.0.0        # Latest stable version
+tiktoken==0.8.0        # Latest stable version
+xlsxwriter==3.2.0      # Latest stable version
 
 # LLM provider - OpenAI
-openai>=1.0.0
+openai==1.54.4         # Latest stable version
+
+# Content ingestion dependencies
+yt-dlp==2024.12.23     # Latest stable version
+feedparser==6.0.11     # Latest stable version
+pydub==0.25.1          # Latest stable version
+ffmpeg-python==0.2.0   # Latest stable version
+requests==2.32.3       # Latest stable version
 
 # Optional: for better file handling
-textract>=1.6.5  # If you want to handle PDFs or other formats later
+# textract>=1.6.5  # Commented out - has invalid metadata with pip>=24.1
 
 # Development dependencies
 pytest>=7.4.0
