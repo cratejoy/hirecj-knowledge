@@ -1,0 +1,67 @@
+--- a/lightrag/api/routers/graph_routes.py
++++ b/lightrag/api/routers/graph_routes.py
+@@ -170,5 +170,50 @@ def create_graph_routes(rag, api_key: Optional[str] = None):
+                 status_code=500, detail=f"Error updating relation: {str(e)}"
+             )
+ 
++    @router.get("/graph/stats", dependencies=[Depends(combined_auth)])
++    async def get_graph_statistics():
++        """
++        Get comprehensive statistics about the knowledge graph
++        
++        Returns:
++            Dict containing graph, vector database, and storage statistics
++        """
++        try:
++            stats = {
++                "graph": {
++                    "nodes": 0,
++                    "edges": 0
++                },
++                "vector_db": {
++                    "entities": 0,
++                    "relationships": 0,
++                    "chunks": 0
++                },
++                "storage": {
++                    "text_chunks": 0
++                },
++                "labels": {
++                    "unique_count": 0,
++                    "samples": []
++                }
++            }
++            
++            # Get graph statistics
++            if hasattr(rag.chunk_entity_relation_graph, '_graph'):
++                graph = rag.chunk_entity_relation_graph._graph
++                stats["graph"]["nodes"] = graph.number_of_nodes()
++                stats["graph"]["edges"] = graph.number_of_edges()
++            
++            # Get vector storage statistics
++            if hasattr(rag.entities_vdb, '_client'):
++                stats["vector_db"]["entities"] = len(rag.entities_vdb._client)
++            if hasattr(rag.relationships_vdb, '_client'):
++                stats["vector_db"]["relationships"] = len(rag.relationships_vdb._client)
++            if hasattr(rag.chunks_vdb, '_client'):
++                stats["vector_db"]["chunks"] = len(rag.chunks_vdb._client)
++            
++            # Get text chunks count
++            all_chunks = await rag.text_chunks.get_all()
++            stats["storage"]["text_chunks"] = len(all_chunks)
++            
++            # Get labels
++            labels = await rag.chunk_entity_relation_graph.get_all_labels()
++            stats["labels"]["unique_count"] = len(labels)
++            stats["labels"]["samples"] = labels[:10]  # First 10 samples
++            
++            return stats
++            
++        except Exception as e:
++            logger.error(f"Error getting graph statistics: {str(e)}")
++            logger.error(traceback.format_exc())
++            raise HTTPException(
++                status_code=500, detail=f"Error getting graph statistics: {str(e)}"
++            )
++
+     return router
