@@ -12,6 +12,7 @@ sys.path.insert(0, str(project_root))
 from lightrag import LightRAG, QueryParam
 from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
 from lightrag.utils import logger, set_verbose_debug
+from lightrag.kg.shared_storage import initialize_pipeline_status
 
 # Load environment variables
 load_dotenv()
@@ -40,6 +41,7 @@ async def initialize_rag():
     )
     
     await rag.initialize_storages()
+    await initialize_pipeline_status()
     return rag
 
 async def load_transcripts(rag, transcripts_dir):
@@ -52,8 +54,11 @@ async def load_transcripts(rag, transcripts_dir):
     
     txt_files = list(transcript_path.glob("*.txt"))
     
+    # Filter out non-transcript files
+    txt_files = [f for f in txt_files if f.name not in ['requirements.txt', 'runtime.txt', 'aider.txt', 'scripts.txt', 'analysis_iteration_0.txt', 'overall_summary.txt']]
+    
     if not txt_files:
-        print(f"No .txt files found in {transcripts_dir}")
+        print(f"No transcript files found in {transcripts_dir}")
         return False
     
     print(f"\nFound {len(txt_files)} transcript files")
@@ -68,7 +73,13 @@ async def load_transcripts(rag, transcripts_dir):
         except Exception as e:
             print(f"Error processing {file_path.name}: {e}")
     
-    print("\nAll transcripts loaded successfully!")
+    print("\nAll transcripts loaded!")
+    print("Note: LightRAG processes documents asynchronously. The knowledge graph may take a few minutes to build.")
+    print("For best results, wait a moment before querying.")
+    
+    # Give some time for initial processing
+    await asyncio.sleep(5)
+    
     return True
 
 async def interactive_query(rag):
@@ -187,5 +198,35 @@ async def main():
             await rag.finalize_storages()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    
+    # Check if running in non-interactive mode
+    if len(sys.argv) > 1 and sys.argv[1] == "--sample":
+        async def run_sample_only():
+            configure_logging()
+            try:
+                print("Initializing LightRAG...")
+                rag = await initialize_rag()
+                
+                # Check if data exists
+                db_file = WORKING_DIR / "vdb_entities.json"
+                if not db_file.exists():
+                    print("\nLoading transcripts for the first time...")
+                    success = await load_transcripts(rag, str(TRANSCRIPTS_DIR))
+                    if not success:
+                        return
+                
+                # Run sample queries
+                await run_sample_queries(rag)
+                
+            except Exception as e:
+                print(f"An error occurred: {e}")
+            finally:
+                if 'rag' in locals():
+                    await rag.finalize_storages()
+        
+        asyncio.run(run_sample_only())
+    else:
+        asyncio.run(main())
+    
     print("\nDemo completed!")
