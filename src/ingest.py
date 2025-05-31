@@ -168,7 +168,13 @@ class ContentProcessor:
                     print(f"✓ Completed: {item_file.stem}")
                 except Exception as e:
                     print(f"✗ Failed: {item_file.stem} - {str(e)}")
-                    self._move_to_failed(item_file, str(e))
+                    # Check if it's in downloading (RSS might be partial)
+                    downloading_file = self.base_dir / 'downloading' / item_file.name
+                    if downloading_file.exists():
+                        # Move to failed since we don't know the state
+                        self._move_to_failed(downloading_file, str(e))
+                    else:
+                        self._move_to_failed(item_file, str(e))
     
     def process_item(self, item_file: Path):
         """Process single item through all stages"""
@@ -185,25 +191,46 @@ class ContentProcessor:
         try:
             if content_type == 'rss':
                 limit = data.get('limit')
-                self._process_rss(url, item_id, limit)
+                status = self._process_rss(url, item_id, limit)
+                # Only delete if fully processed
+                if status == 'completed':
+                    downloading_file = self.base_dir / 'downloading' / item_file.name
+                    if downloading_file.exists():
+                        downloading_file.unlink()
+                else:
+                    # Move back to inbox for resumption
+                    downloading_file = self.base_dir / 'downloading' / item_file.name
+                    if downloading_file.exists():
+                        downloading_file.rename(self.base_dir / 'inbox' / item_file.name)
+                    print(f"  📌 RSS feed partially processed - moved back to inbox for resumption")
             elif content_type == 'youtube':
                 self._process_youtube(url, item_id)
+                # YouTube is single item, safe to delete
+                downloading_file = self.base_dir / 'downloading' / item_file.name
+                if downloading_file.exists():
+                    downloading_file.unlink()
             else:
                 raise NotImplementedError(f"Type {content_type} not yet supported")
-        finally:
-            # Cleanup downloading marker
-            downloading_file = self.base_dir / 'downloading' / item_file.name
-            if downloading_file.exists():
-                downloading_file.unlink()
     
     def _process_rss(self, rss_url: str, feed_id: str, limit: int = None):
-        """Process RSS feed - download and process multiple episodes"""
+        """Process RSS feed - download and process multiple episodes
+        
+        Returns:
+            'completed' if all episodes processed (or hit limit)
+            'partial' if some episodes remain unprocessed
+        """
         print(f"  📡 Parsing RSS feed: {rss_url}")
         feed = feedparser.parse(rss_url)
         
         feed_title = feed.feed.get('title', 'Unknown Feed')
         print(f"  📰 Feed title: {feed_title}")
         print(f"  📊 Total entries: {len(feed.entries)}")
+        
+        # Track processing stats
+        total_episodes = 0
+        processed_episodes = 0
+        failed_episodes = 0
+        skipped_episodes = 0
         
         # Find episodes with audio
         audio_episodes = []
@@ -245,6 +272,8 @@ class ContentProcessor:
         if limit:
             print(f"  📌 Limited to {limit} episode(s) as requested")
         
+        total_episodes = len(audio_episodes)
+        
         # Process each episode
         for ep_num, episode in enumerate(audio_episodes, 1):
             print(f"\n  {'='*60}")
@@ -257,16 +286,32 @@ class ContentProcessor:
             # Check if already processed
             if self._is_episode_processed(episode_id):
                 print(f"  ⏭️  Skipping - already processed")
+                skipped_episodes += 1
                 continue
             
             try:
                 # Download and process this episode
                 self._process_episode(episode, episode_id, feed_title, rss_url)
+                processed_episodes += 1
                 
             except Exception as e:
                 print(f"  ❌ Failed to process episode: {str(e)}")
+                failed_episodes += 1
                 # Continue with next episode instead of failing entire feed
                 continue
+        
+        # Summary and return status
+        print(f"\n  📊 RSS Feed Processing Summary:")
+        print(f"     Total episodes: {total_episodes}")
+        print(f"     Processed: {processed_episodes}")
+        print(f"     Skipped (already done): {skipped_episodes}")
+        print(f"     Failed: {failed_episodes}")
+        
+        # Determine completion status
+        if processed_episodes + skipped_episodes + failed_episodes >= total_episodes:
+            return 'completed'
+        else:
+            return 'partial'
     
     def _is_episode_processed(self, episode_id: str) -> bool:
         """Check if episode is already processed"""
