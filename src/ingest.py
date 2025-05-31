@@ -188,29 +188,28 @@ class ContentProcessor:
         # Move to downloading
         item_file.rename(self.base_dir / 'downloading' / item_file.name)
         
-        try:
-            if content_type == 'rss':
-                limit = data.get('limit')
-                status = self._process_rss(url, item_id, limit)
-                # Only delete if fully processed
-                if status == 'completed':
-                    downloading_file = self.base_dir / 'downloading' / item_file.name
-                    if downloading_file.exists():
-                        downloading_file.unlink()
-                else:
-                    # Move back to inbox for resumption
-                    downloading_file = self.base_dir / 'downloading' / item_file.name
-                    if downloading_file.exists():
-                        downloading_file.rename(self.base_dir / 'inbox' / item_file.name)
-                    print(f"  📌 RSS feed partially processed - moved back to inbox for resumption")
-            elif content_type == 'youtube':
-                self._process_youtube(url, item_id)
-                # YouTube is single item, safe to delete
+        if content_type == 'rss':
+            limit = data.get('limit')
+            status = self._process_rss(url, item_id, limit)
+            # Only delete if fully processed
+            if status == 'completed':
                 downloading_file = self.base_dir / 'downloading' / item_file.name
                 if downloading_file.exists():
                     downloading_file.unlink()
             else:
-                raise NotImplementedError(f"Type {content_type} not yet supported")
+                # Move back to inbox for resumption
+                downloading_file = self.base_dir / 'downloading' / item_file.name
+                if downloading_file.exists():
+                    downloading_file.rename(self.base_dir / 'inbox' / item_file.name)
+                print(f"  📌 RSS feed partially processed - moved back to inbox for resumption")
+        elif content_type == 'youtube':
+            self._process_youtube(url, item_id)
+            # YouTube is single item, safe to delete
+            downloading_file = self.base_dir / 'downloading' / item_file.name
+            if downloading_file.exists():
+                downloading_file.unlink()
+        else:
+            raise NotImplementedError(f"Type {content_type} not yet supported")
     
     def _process_rss(self, rss_url: str, feed_id: str, limit: int = None):
         """Process RSS feed - download and process multiple episodes
@@ -259,25 +258,25 @@ class ContentProcessor:
                     'published': entry.get('published_parsed', None),
                     'index': i
                 })
-                
-                # Check if we've hit the limit
-                if limit and len(audio_episodes) >= limit:
-                    break
         
         if not audio_episodes:
             print(f"  ❌ No audio episodes found in RSS feed")
             raise ValueError("No audio episodes found in RSS feed")
         
         print(f"  ✅ Found {len(audio_episodes)} audio episode(s)")
-        if limit:
-            print(f"  📌 Limited to {limit} episode(s) as requested")
         
         total_episodes = len(audio_episodes)
         
+        # Apply limit to processing
+        episodes_to_process = audio_episodes
+        if limit and limit < len(audio_episodes):
+            episodes_to_process = audio_episodes[:limit]
+            print(f"  📌 Limited to {limit} episode(s) as requested (out of {total_episodes} total)")
+        
         # Process each episode
-        for ep_num, episode in enumerate(audio_episodes, 1):
+        for ep_num, episode in enumerate(episodes_to_process, 1):
             print(f"\n  {'='*60}")
-            print(f"  📻 Episode {ep_num}/{len(audio_episodes)}: {episode['title'][:60]}...")
+            print(f"  📻 Episode {ep_num}/{len(episodes_to_process)}: {episode['title'][:60]}...")
             
             # Create unique ID for this episode
             episode_hash = hashlib.md5(episode['url'].encode()).hexdigest()[:8]
@@ -302,15 +301,29 @@ class ContentProcessor:
         
         # Summary and return status
         print(f"\n  📊 RSS Feed Processing Summary:")
-        print(f"     Total episodes: {total_episodes}")
+        print(f"     Total episodes in feed: {total_episodes}")
+        print(f"     Episodes attempted: {len(episodes_to_process)}")
         print(f"     Processed: {processed_episodes}")
         print(f"     Skipped (already done): {skipped_episodes}")
         print(f"     Failed: {failed_episodes}")
         
         # Determine completion status
-        if processed_episodes + skipped_episodes + failed_episodes >= total_episodes:
-            return 'completed'
+        # If we processed all episodes in the feed, or hit our limit, we're "complete"
+        # Only return "partial" if we were interrupted before hitting our target
+        episodes_done = processed_episodes + skipped_episodes + failed_episodes
+        target_episodes = len(episodes_to_process)
+        
+        if episodes_done >= target_episodes:
+            # We processed everything we intended to
+            if limit and limit < total_episodes:
+                print(f"  ✅ Completed processing limit of {limit} episodes")
+                # Still mark as partial so we can resume for more episodes
+                return 'partial'
+            else:
+                return 'completed'
         else:
+            # We were interrupted
+            print(f"  ⚠️  Only processed {episodes_done}/{target_episodes} episodes")
             return 'partial'
     
     def _is_episode_processed(self, episode_id: str) -> bool:
