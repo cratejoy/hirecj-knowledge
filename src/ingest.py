@@ -50,7 +50,7 @@ class ContentProcessor:
         # Determine content type
         if 'youtube.com' in url or 'youtu.be' in url:
             prefix = 'youtube'
-        elif any(x in url for x in ['.rss', 'feed', 'podcast']):
+        elif any(x in url for x in ['.rss', '/rss', 'feed', 'podcast', 'libsyn']):
             prefix = 'rss'
         else:
             prefix = 'content'
@@ -106,7 +106,10 @@ class ContentProcessor:
     
     def process_inbox(self):
         """Process all items in inbox and resume any incomplete work"""
-        # First, check for transcripts that need loading
+        # First, check for stuck documents in LightRAG
+        self._check_pending_lightrag_docs()
+        
+        # Then check for transcripts that need loading
         transcripts_to_load = list((self.base_dir / 'transcripts').glob('*.txt'))
         if transcripts_to_load:
             print(f"📋 Found {len(transcripts_to_load)} transcript(s) to load into LightRAG")
@@ -116,7 +119,7 @@ class ContentProcessor:
                     with open(transcript_file, encoding='utf-8') as f:
                         content = f.read()
                     
-                    self._load_to_lightrag(content)
+                    self._load_to_lightrag(content, transcript_file.stem)
                     print(f"  ✅ Successfully loaded into knowledge graph!")
                     
                     # Move to loaded directory
@@ -133,8 +136,8 @@ class ContentProcessor:
         items = list(inbox.glob('*.json'))
         
         if not items and not transcripts_to_load:
-            print("No items to process")
-            return
+            print("No new items to process")
+            # Don't return - let it continue to check other things
         
         if items:
             # Deduplicate by URL
@@ -470,7 +473,7 @@ Date: {metadata.get('download_date', 'Unknown')}
         
         # Load into LightRAG
         print(f"\n  🧠 Loading into LightRAG...")
-        self._load_to_lightrag(enriched)
+        self._load_to_lightrag(enriched, item_id)
         print(f"  ✅ Successfully loaded into knowledge graph!")
         
         # Move to loaded directory
@@ -517,7 +520,7 @@ Date: {metadata.get('download_date', 'Unknown')}
             )
         return response
     
-    def _load_to_lightrag(self, content: str):
+    def _load_to_lightrag(self, content: str, item_id: str = None):
         """Load transcript into LightRAG"""
         try:
             # Try the simple approach first
@@ -535,7 +538,11 @@ Date: {metadata.get('download_date', 'Unknown')}
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(rag.ainsert(content))
+                # Include file_paths for source tracking if item_id is provided
+                if item_id:
+                    loop.run_until_complete(rag.ainsert(content, file_paths=[f"{item_id}.txt"]))
+                else:
+                    loop.run_until_complete(rag.ainsert(content))
             finally:
                 loop.close()
                 
@@ -546,6 +553,184 @@ Date: {metadata.get('download_date', 'Unknown')}
                 # Don't raise - treat as success
             else:
                 raise
+    
+    def _check_pending_lightrag_docs(self):
+        """Check for and reprocess any pending documents in LightRAG"""
+        try:
+            from lightrag import LightRAG
+            from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
+            from lightrag.base import DocStatus
+            
+            print("🔍 Checking for pending documents in LightRAG...")
+            
+            # Initialize LightRAG to check doc status
+            rag = LightRAG(
+                working_dir="./lightrag_transcripts_db",
+                embedding_func=openai_embed,
+                llm_model_func=gpt_4o_mini_complete,
+            )
+            
+            # Use async to check status
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                # Initialize storages
+                loop.run_until_complete(rag.initialize_storages())
+                
+                # Get status counts
+                status_counts = loop.run_until_complete(rag.get_processing_status())
+                pending_count = status_counts.get(DocStatus.PENDING, 0)
+                
+                if pending_count > 0:
+                    print(f"🔄 Found {pending_count} pending document(s) in LightRAG")
+                    
+                    # Get pending documents
+                    pending_docs = loop.run_until_complete(rag.doc_status.get_docs_by_status(DocStatus.PENDING))
+                    
+                    for doc_id, doc_info in pending_docs.items():
+                        try:
+                            print(f"  📄 Reprocessing pending document: {doc_id}")
+                            
+                            # The content is stored in doc_info
+                            content = doc_info.content if hasattr(doc_info, 'content') else str(doc_info.get('content', ''))
+                            
+                            if content:
+                                # Extract a reasonable item_id from file_path or doc_id
+                                file_path = doc_info.file_path if hasattr(doc_info, 'file_path') else doc_info.get('file_path', f"{doc_id}.txt")
+                                if file_path == "unknown_source":
+                                    file_path = f"{doc_id.replace('doc-', '')[:8]}.txt"
+                                
+                                # Re-insert to trigger processing
+                                loop.run_until_complete(rag.ainsert(content, file_paths=[file_path]))
+                                print(f"    ✅ Successfully reprocessed with source: {file_path}")
+                            else:
+                                print(f"    ⚠️  No content found for document")
+                                
+                        except Exception as e:
+                            print(f"    ❌ Failed to reprocess: {str(e)}")
+                else:
+                    print("  ✅ No pending documents found")
+                            
+            finally:
+                loop.close()
+                
+        except Exception as e:
+            # Log the error but continue
+            print(f"  ⚠️  Could not check pending docs: {str(e)}")
+    
+    def status(self):
+        """Show pipeline status with counts at each stage"""
+        print("\n📊 Content Pipeline Status")
+        print("=" * 60)
+        
+        # Count files at each stage
+        stages = [
+            ("📥 Inbox", self.base_dir / "inbox", "*.json"),
+            ("⬇️  Downloading", self.base_dir / "downloading", "*"),
+            ("💾 Downloaded", self.base_dir / "downloaded", "*"),
+            ("🎵 Audio", self.base_dir / "audio", "*"),
+            ("🔪 Chunks", self.base_dir / "chunks", "*"),
+            ("🎙️  Transcribing", self.base_dir / "transcribing", "*"),
+            ("📝 Transcripts", self.base_dir / "transcripts", "*.txt"),
+            ("✅ Loaded", self.base_dir / "loaded", "*.txt"),
+            ("❌ Failed", self.base_dir / "failed", "*.error"),
+        ]
+        
+        total_items = 0
+        for name, path, pattern in stages:
+            if path.exists():
+                items = list(path.glob(pattern))
+                # For directories with subdirs, count the subdirs not files
+                if name in ["⬇️  Downloading", "💾 Downloaded", "🎵 Audio", "🔪 Chunks", "🎙️  Transcribing"]:
+                    items = [item for item in items if item.is_dir()]
+                count = len(items)
+                total_items += count
+                
+                if count > 0:
+                    print(f"{name:<20} {count:>5} items")
+                    # Show first few items for context
+                    for item in items[:3]:
+                        print(f"  └─ {item.name}")
+                    if count > 3:
+                        print(f"  └─ ... and {count - 3} more")
+            else:
+                print(f"{name:<20}     0 items")
+        
+        print("-" * 60)
+        print(f"{'Total in Pipeline:':<20} {total_items:>5} items")
+        
+        # Check LightRAG status
+        print("\n🧠 LightRAG Database Status")
+        print("=" * 60)
+        
+        try:
+            from lightrag import LightRAG
+            from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
+            from lightrag.base import DocStatus
+            
+            # Initialize LightRAG
+            rag = LightRAG(
+                working_dir="./lightrag_transcripts_db",
+                embedding_func=openai_embed,
+                llm_model_func=gpt_4o_mini_complete,
+            )
+            
+            # Use async to get actual counts
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                # Initialize storages
+                loop.run_until_complete(rag.initialize_storages())
+                
+                # Get processing status
+                status_counts = loop.run_until_complete(rag.get_processing_status())
+                
+                # Display status counts
+                statuses = [
+                    ("✅ Processed", DocStatus.PROCESSED),
+                    ("⏳ Processing", DocStatus.PROCESSING),
+                    ("🔄 Pending", DocStatus.PENDING),
+                    ("❌ Failed", DocStatus.FAILED),
+                ]
+                
+                total_docs = 0
+                for name, status in statuses:
+                    count = status_counts.get(status, 0)
+                    total_docs += count
+                    if count > 0:
+                        print(f"{name:<20} {count:>5} documents")
+                
+                print("-" * 60)
+                print(f"{'Total Documents:':<20} {total_docs:>5} documents")
+                
+                # Get some stats about the knowledge graph
+                print("\n📈 Knowledge Graph Stats")
+                print("=" * 60)
+                
+                # Count entities and relationships
+                try:
+                    entity_count = len(rag.entities)
+                    relationship_count = len(rag.relationships) 
+                    chunk_count = len(rag.chunks)
+                    
+                    print(f"{'🏷️  Entities:':<20} {entity_count:>5}")
+                    print(f"{'🔗 Relationships:':<20} {relationship_count:>5}")
+                    print(f"{'📄 Chunks:':<20} {chunk_count:>5}")
+                except:
+                    print("  ⚠️  Could not retrieve graph statistics")
+                
+            finally:
+                loop.close()
+                
+        except Exception as e:
+            print(f"  ⚠️  Could not connect to LightRAG: {str(e)}")
+        
+        print("\n💡 Tip: Run 'python src/ingest.py process' to process pending items")
+        print()
     
     def _move_to_failed(self, item_file: Path, error: str):
         """Move failed item and record error"""
@@ -575,36 +760,6 @@ Date: {metadata.get('download_date', 'Unknown')}
         with open(error_file, 'w') as f:
             json.dump(error_data, f, indent=2)
     
-    def status(self):
-        """Show status of all directories"""
-        dirs = ['inbox', 'downloading', 'downloaded', 'audio', 
-                'chunks', 'transcribing', 'transcripts', 'loaded', 'failed']
-        
-        print("\n📊 Pipeline Status:")
-        print("-" * 40)
-        
-        total_items = 0
-        for d in dirs:
-            count = len(list((self.base_dir / d).glob('*')))
-            total_items += count
-            if count > 0:
-                emoji = {
-                    'inbox': '📨',
-                    'downloading': '⬇️',
-                    'downloaded': '💾',
-                    'audio': '🎵',
-                    'chunks': '✂️',
-                    'transcribing': '🎙️',
-                    'transcripts': '📝',
-                    'loaded': '✅',
-                    'failed': '❌'
-                }.get(d, '📁')
-                print(f"{emoji} {d:15} {count:3} items")
-        
-        if total_items == 0:
-            print("(empty - no items in pipeline)")
-        
-        print("-" * 40)
 
 
 def main():
@@ -612,7 +767,10 @@ def main():
     processor = ContentProcessor()
     
     if len(sys.argv) < 2:
-        print("Usage: ingest.py [add URL [--limit N] | process | status]")
+        print("Usage:")
+        print("  python src/ingest.py add URL [--limit N]  # Add content to process")
+        print("  python src/ingest.py process               # Process all pending items")
+        print("  python src/ingest.py status                # Show pipeline status")
         sys.exit(1)
     
     command = sys.argv[1]
@@ -638,7 +796,10 @@ def main():
         processor.status()
     
     else:
-        print("Invalid command. Use: add URL [--limit N] | process | status")
+        print("Usage:")
+        print("  python src/ingest.py add URL [--limit N]  # Add content to process")
+        print("  python src/ingest.py process               # Process all pending items")
+        print("  python src/ingest.py status                # Show pipeline status")
         sys.exit(1)
 
 
