@@ -601,6 +601,9 @@ Date: {metadata.get('download_date', 'Unknown')}
                     loop.run_until_complete(rag.ainsert(content, file_paths=[f"{item_id}.txt"]))
                 else:
                     loop.run_until_complete(rag.ainsert(content))
+                    
+                # Trigger processing of pending documents
+                loop.run_until_complete(rag.apipeline_process_enqueue_documents())
             finally:
                 loop.close()
                 
