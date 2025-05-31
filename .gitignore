@@ -62,8 +62,25 @@ htmlcov/
 # Distribution / packaging
 dist/
 build/
-*.spec# Ignore large media files
-content/audio/
-content/downloaded/
-content/chunks/
-content/transcribing/
+*.spec# Pipeline content directories
+# Keep directory structure but ignore all content
+content/inbox/*
+content/downloading/*
+content/downloaded/*
+content/audio/*
+content/chunks/*
+content/transcribing/*
+content/transcripts/*
+content/loaded/*
+content/failed/*
+
+# But keep the directories themselves
+!content/inbox/.gitkeep
+!content/downloading/.gitkeep
+!content/downloaded/.gitkeep
+!content/audio/.gitkeep
+!content/chunks/.gitkeep
+!content/transcribing/.gitkeep
+!content/transcripts/.gitkeep
+!content/loaded/.gitkeep
+!content/failed/.gitkeep
