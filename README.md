@@ -50,10 +50,22 @@ The demo provides:
 ```
 hirecj-knowledge/
 ├── src/
+│   ├── ingest.py              # RSS/YouTube ingestion pipeline
 │   └── scripts/
 │       └── lightrag_transcripts_demo.py
-├── transcripts/         # Video transcript files
-├── lightrag_transcripts_db/  # LightRAG database (auto-created)
+├── content/                   # Content processing pipeline
+│   ├── inbox/                 # New URLs to process
+│   ├── downloading/           # Currently downloading
+│   ├── transcripts/           # Ready for LightRAG
+│   └── loaded/                # Processed transcripts
+├── transcripts/               # Video transcript files
+├── lightrag_transcripts_db/   # LightRAG database (auto-created)
+├── docs/
+│   └── lightrag-source-attribution.md  # Guide for meaningful source citations
 ├── requirements.txt
 └── README.md
 ```
+
+## Documentation
+
+- [LightRAG Source Attribution Guide](docs/lightrag-source-attribution.md) - How to ensure meaningful source citations instead of cryptic IDs like `[KG] rss_abc123_ep456.txt`

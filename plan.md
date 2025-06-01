@@ -107,3 +107,27 @@ RSS Feed → Create 591 episode files → Delete RSS → Each episode independen
 2. **No reprocessing** - Already processed episodes never re-download
 3. **Clean inbox** - One file per work item, no compound objects
 4. **Natural resumption** - Just run `process` again, it figures it out
+
+## 📝 LightRAG Document Processing Issue Investigation
+
+### Problem
+Documents were getting stuck in "pending" status after being inserted with `ainsert()`.
+
+### Root Cause
+LightRAG is designed with an asynchronous processing pipeline. The `ainsert()` method:
+1. Enqueues documents for processing
+2. Calls `apipeline_process_enqueue_documents()` internally
+3. BUT - the actual processing happens asynchronously in a background worker
+
+### Solution
+1. Added proper initialization of storages and pipeline status
+2. Changed from async `ainsert()` to sync `insert()` method which uses `asyncio.run()`
+3. Added status checking after insert to report on pending/processing documents
+4. Created `process_pending_docs.py` script to manually trigger processing of pending documents
+
+### Key Findings
+- Must call `initialize_storages()` and `initialize_pipeline_status()` before using LightRAG
+- The `insert()` method is synchronous but still processes documents asynchronously
+- Documents may remain in "pending" status until the processing pipeline runs
+- Can manually trigger processing with `apipeline_process_enqueue_documents()`
+- The LightRAG server mode (`lightrag-server`) likely handles background processing automatically
