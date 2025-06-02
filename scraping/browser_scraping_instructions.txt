@@ -1,0 +1,44 @@
+
+=== BROWSER SCRAPING INSTRUCTIONS ===
+
+1. Open https://forum.ecommercefuel.com/latest in your browser
+2. Make sure you're logged in to see all posts
+3. Use browser MCP tools to extract posts:
+
+For each "page" of results (as you scroll):
+   a) Take a snapshot of the current view
+   b) Extract all visible posts with these fields:
+      - Author name
+      - Post title
+      - URL
+      - Category
+      - Tags (if any)
+      - Number of replies
+      - View count
+      - Last activity time
+   
+4. Scroll down to load more posts (endless scroll)
+5. Wait for new posts to load
+6. Repeat steps 3-5 until no new posts load
+
+7. Use the scraper.add_posts_from_snapshot() method to add posts
+8. Call scraper.save_progress() periodically
+9. Call scraper.export_final_data() when complete
+
+Example usage:
+```python
+scraper = EndlessScrollScraper()
+
+# After extracting posts from page 1
+posts_page1 = [...]  # Your extracted posts
+scraper.add_posts_from_snapshot(posts_page1, 1)
+scraper.save_progress(1)
+
+# After scrolling and extracting more posts
+posts_page2 = [...]  # New posts after scroll
+scraper.add_posts_from_snapshot(posts_page2, 2)
+scraper.save_progress(2)
+
+# When done
+scraper.export_final_data()
+```

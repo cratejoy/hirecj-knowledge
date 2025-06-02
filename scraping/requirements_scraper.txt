@@ -1,0 +1,7 @@
+# EcommerceFuel Forum Scraper Requirements
+playwright==1.40.0
+rich==13.7.0  # For nice terminal UI (optional but recommended)
+python-dateutil==2.8.2
+requests==2.31.0  # For API calls if needed
+beautifulsoup4==4.12.2  # For HTML parsing fallback
+lxml==4.9.3  # For faster HTML parsing
