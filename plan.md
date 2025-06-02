@@ -98,18 +98,53 @@ python ecommercefuel_scraper.py
 ### Progress JSON Structure
 ```json
 {
-  "last_scraped_at": "2024-01-06T12:00:00Z",
-  "scraped_urls": [
-    "/t/faire-is-doing-fulfillment/86921",
-    "/t/my-first-ai-coding-project/86917"
-  ],
-  "failed_urls": [
-    "/t/some-deleted-thread/12345"
-  ],
-  "scroll_position": 150,
+  "last_run": "2024-01-06T12:00:00Z",
+  "threads": {
+    "/t/faire-is-doing-fulfillment/86921": {
+      "last_scraped": "2024-01-05T10:00:00Z",
+      "last_activity": "13m",
+      "reply_count": 7
+    },
+    "/t/my-first-ai-coding-project/86917": {
+      "last_scraped": "2024-01-06T09:00:00Z", 
+      "last_activity": "2h",
+      "reply_count": 12
+    }
+  },
+  "failed_urls": [],
   "total_scraped": 523
 }
 ```
+
+### Simple Update Logic
+- **New thread**: Not in progress.json → Scrape it
+- **Active thread**: last_activity changed → Re-scrape it  
+- **Inactive thread**: last_activity same → Skip it
+- **Failed thread**: In failed_urls → Retry once per run
+
+### Thread Tracking Strategy
+The key insight: We track `last_activity` from the topic list (e.g., "13m", "2h", "3d") along with when we last scraped each thread. This gives us a simple decision tree:
+
+1. **During Topic List Scraping** (Phase 3):
+   - Collect all topics via infinite scroll
+   - For each topic, capture: URL, title, category, tags, replies, views, **last_activity**
+   - Compare with progress.json to determine which threads need scraping
+
+2. **During Thread Scraping** (Phase 4):
+   - Only visit threads that are new or have updated activity
+   - After scraping, update progress.json with current timestamp and last_activity value
+   - This creates a simple cache that prevents unnecessary re-scraping
+
+3. **Example Flow**:
+   ```
+   Topic List shows: /t/some-thread/123 with last_activity: "2h"
+   progress.json has: /t/some-thread/123 with last_activity: "2h"
+   → Skip (no new activity)
+   
+   Topic List shows: /t/some-thread/123 with last_activity: "15m"  
+   progress.json has: /t/some-thread/123 with last_activity: "2h"
+   → Scrape (new activity detected)
+   ```
 
 ## ✅ Phase Checklist
 
@@ -117,18 +152,20 @@ python ecommercefuel_scraper.py
   - [x] 1.1 Basic Browser Launch
   - [x] 1.2 Cookie Management
   - [x] 1.3 Login Flow
-- [ ] **Phase 2**: Forum Structure Discovery
-  - [ ] 2.1 Topic List Structure
-  - [ ] 2.2 Post Data Extraction
-  - [ ] 2.3 Infinite Scroll Detection
-- [ ] **Phase 3**: Infinite Scroll Implementation
-  - [ ] 3.1 Basic Scroll Test
-  - [ ] 3.2 Deduplication Strategy
-  - [ ] 3.3 Scroll Completion Detection
-- [ ] **Phase 4**: Individual Post Scraping
-  - [ ] 4.1 Thread Navigation
-  - [ ] 4.2 Reply Extraction
-  - [ ] 4.3 Thread Pagination
+- [x] **Phase 2**: Forum Structure Discovery ✅ IMPLEMENTED
+  - [x] 2.1 Topic List Structure
+  - [x] 2.2 Post Data Extraction (Note: Author extraction needs fixing)
+  - [x] 2.3 Infinite Scroll Detection
+- [x] **Phase 3**: Topic List Scraping with Progress Tracking ✅ IMPLEMENTED
+  - [x] 3.1 Fix Author Extraction (selector: img.avatar + data-user-card)
+  - [x] 3.2 Implement Thread Tracking Logic (track last_activity)
+  - [x] 3.3 Infinite Scroll to Collect All Topics
+  - [x] 3.4 Save Topic Metadata to progress.json
+- [ ] **Phase 4**: Individual Thread Scraping
+  - [ ] 4.1 Thread Navigation & Activity Check
+  - [ ] 4.2 Full Reply Chain Extraction
+  - [ ] 4.3 Detailed Author Data Extraction (from thread view)
+  - [ ] 4.4 Update progress.json with Scrape Timestamp
 - [ ] **Phase 5**: Output & Resume Strategy
   - [ ] 5.1 File Naming
   - [ ] 5.2 Progress Tracking
@@ -431,11 +468,13 @@ async def main():
 
 ## 📝 Known Issues From Research
 
-1. **Infinite Scroll**: Forum uses `.loading-container` indicator
+1. **Infinite Scroll**: Forum uses `.loading-container` indicator ✅ CONFIRMED
 2. **Login Check**: Multiple possible selectors, need to verify
 3. **View Counts**: Can have 'k' suffix (e.g., "1.2k" = 1200)
 4. **URL Structure**: Relative URLs need base URL prepended
 5. **Post Elements**: `.cooked` class contains post HTML content
+6. **Author Extraction**: Topic list author selector `td:first-child a` returns empty - need to use `img.avatar` with `data-user-card` attribute instead
+7. **Topic Stats**: Last 3 cells contain replies, views, and last_activity time
 
 ## 🚨 Critical Decision Points
 
