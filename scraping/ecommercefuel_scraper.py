@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-EcommerceFuel Forum Scraper - Phase 1 & 2: Browser Setup & Forum Structure Discovery
+EcommerceFuel Forum Scraper - Complete Implementation with JSON-to-Text Conversion
 Simple, elegant Playwright-based scraper following North Star principles
 """
 
 import json
 import os
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from playwright.sync_api import sync_playwright, Page, Browser, BrowserContext
@@ -1028,40 +1029,132 @@ class EcommerceFuelScraper:
                 browser.close()
 
 
+    # ==================== JSON-TO-TEXT CONVERSION ====================
+    
+    def convert_to_transcript(self, json_path: Path, output_dir: Path) -> None:
+        """Convert forum JSON to plain text transcript for LightRAG"""
+        with open(json_path) as f:
+            data = json.load(f)
+        
+        # Get the primary author (from first post if main author is empty)
+        main_author = ""
+        if data.get('posts') and len(data['posts']) > 0:
+            first_post = data['posts'][0]
+            if first_post.get('author', {}).get('username'):
+                main_author = first_post['author']['username']
+        if not main_author and data.get('author', {}).get('username'):
+            main_author = data['author']['username']
+        if not main_author:
+            main_author = "Unknown"
+        
+        # Build metadata header for searchability
+        lines = [
+            f"Forum: EcommerceFuel",
+            f"Title: {data.get('title', 'Untitled')}",
+            f"Author: {main_author}",
+            f"Category: {data.get('category', 'Unknown')}",
+            f"Tags: {', '.join(data.get('tags', []))}",
+            f"URL: https://forum.ecommercefuel.com{data.get('url', '')}",
+            f"Created: {data.get('created_at', '')}",
+            f"Replies: {data.get('stats', {}).get('replies', 0)}",
+            f"Views: {data.get('stats', {}).get('views', 0)}",
+            f"Last Activity: {data.get('stats', {}).get('last_activity', '')}",
+            "",
+            "===== Discussion =====",
+            ""
+        ]
+        
+        # Add posts as conversation
+        for post in data.get('posts', []):
+            author = post.get('author', {}).get('username') or post.get('author', {}).get('display_name') or "Unknown"
+            content = post.get('content_text', '').strip()
+            
+            if content:  # Only add non-empty posts
+                lines.extend([
+                    f"{author}:",
+                    content,
+                    ""
+                ])
+        
+        # Create citation-friendly filename
+        # Format: "EcommerceFuel - {Title} - {Author}.txt"
+        safe_title = re.sub(r'[^a-zA-Z0-9 -]', '', data.get('title', 'Untitled'))[:60].strip()
+        safe_author = re.sub(r'[^a-zA-Z0-9]', '', main_author)[:20]
+        filename = f"EcommerceFuel - {safe_title} - {safe_author}.txt"
+        
+        # Write the file
+        output_path = output_dir / filename
+        output_path.write_text('\n'.join(lines), encoding='utf-8')
+        logger.info(f"Converted {json_path.name} → {filename}")
+    
+    def convert_all_posts(self, output_dir: Path) -> int:
+        """Convert all scraped JSON posts to transcript format"""
+        json_files = list(self.posts_dir.glob('*.json'))
+        
+        if not json_files:
+            logger.warning("No JSON files found to convert")
+            return 0
+        
+        logger.info(f"Converting {len(json_files)} posts to transcript format")
+        converted = 0
+        
+        for json_file in json_files:
+            try:
+                self.convert_to_transcript(json_file, output_dir)
+                converted += 1
+            except Exception as e:
+                logger.error(f"Failed to convert {json_file.name}: {e}")
+        
+        return converted
+
+
 if __name__ == "__main__":
     import sys
+    import argparse
     
+    parser = argparse.ArgumentParser(
+        description="EcommerceFuel Forum Scraper",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  python ecommercefuel_scraper.py              # Scrape 10 topics (default)
+  python ecommercefuel_scraper.py 20           # Scrape 20 topics
+  python ecommercefuel_scraper.py --convert    # Convert existing JSON to transcripts
+  python ecommercefuel_scraper.py 5 --convert  # Scrape 5 topics then convert
+  python ecommercefuel_scraper.py phase1       # Initial setup (browser & cookies)
+  python ecommercefuel_scraper.py phase2       # Test forum structure"""
+    )
+    
+    parser.add_argument('command', nargs='?', default='10',
+                        help='Number of topics to scrape, or "phase1"/"phase2" for setup')
+    parser.add_argument('--convert', action='store_true',
+                        help='Convert scraped JSON to transcript format after scraping')
+    parser.add_argument('--output-dir', default='../content/transcripts',
+                        help='Output directory for converted transcripts (default: ../content/transcripts)')
+    
+    args = parser.parse_args()
     scraper = EcommerceFuelScraper()
     
-    # Check for phase commands
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "phase1":
-            scraper.run_phase1()
-        elif sys.argv[1] == "phase2":
-            scraper.run_phase2()
-        elif sys.argv[1].isdigit():
-            # Run streaming scraper with topic limit
-            max_topics = int(sys.argv[1])
-            scraper.run_streaming(max_topics)
-        else:
-            print(f"\nUnknown command: {sys.argv[1]}")
-            print("Use 'phase1', 'phase2', or a number (e.g., 10) to scrape that many topics")
-    else:
-        # Default: run streaming scraper
-        print("\nEcommerceFuel Forum Scraper")
-        print("="*30)
-        print("\nUsage:")
-        print("  python ecommercefuel_scraper.py         - Run streaming scraper (default 10 topics)")
-        print("  python ecommercefuel_scraper.py 20      - Run streaming scraper for 20 topics")
-        print("  python ecommercefuel_scraper.py phase1  - Initial setup (browser & cookies)")
-        print("  python ecommercefuel_scraper.py phase2  - Test forum structure")
-        print("\nCurrent status:")
-        print(f"  - Cookies: {'✅ Saved' if scraper.cookies_file.exists() else '❌ Not saved'}")
-        print(f"  - Progress: {'✅ Exists' if scraper.progress_file.exists() else '❌ Not created'}")
-        print(f"  - Posts directory: {'✅ Ready' if scraper.posts_dir.exists() else '❌ Not created'}")
+    # Handle phase commands
+    if args.command == "phase1":
+        scraper.run_phase1()
+    elif args.command == "phase2":
+        scraper.run_phase2()
+    elif args.command.isdigit():
+        # Run streaming scraper
+        max_topics = int(args.command)
         
-        if not scraper.cookies_file.exists():
-            print("\n⚠️  Run phase1 first to set up browser and login")
-        else:
-            print("\n✅ Ready to scrape! Running default mode...")
-            scraper.run_streaming()
+        if max_topics > 0:
+            print(f"\n📊 Scraping {max_topics} topics...")
+            scraper.run_streaming(max_topics)
+        
+        # Convert if requested
+        if args.convert:
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            print(f"\n🔄 Converting posts to transcript format...")
+            converted = scraper.convert_all_posts(output_dir)
+            print(f"✅ Converted {converted} posts to {output_dir}")
+    else:
+        print(f"\nUnknown command: {args.command}")
+        parser.print_help()
