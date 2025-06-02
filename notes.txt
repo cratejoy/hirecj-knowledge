@@ -1,0 +1,2 @@
+➜ python src/ingest.py add "http://ecommercefuel.libsyn.com/rss"
+➜ python src/ingest.py add "https://feeds.simplecast.com/_Mc9bpsL"

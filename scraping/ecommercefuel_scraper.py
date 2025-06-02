@@ -530,14 +530,21 @@ class EcommerceFuelScraper:
         print("="*60)
         print("\nNext: Implement infinite scroll handling in Phase 3")
     
-    # ==================== PHASE 3: Topic List Scraping with Progress Tracking ====================
+    # ==================== PHASE 3-5: Streaming Implementation with Time-Based Cursors ====================
     
     def load_progress(self) -> Dict:
-        """Load progress tracking data"""
+        """Load progress with time-based bookmarks"""
         if self.progress_file.exists():
             with open(self.progress_file, 'r') as f:
                 return json.load(f)
-        return {"threads": {}, "last_run": None, "total_scraped": 0, "failed_urls": []}
+        return {
+            "last_run": None,
+            "newest_seen": None,  # Bookmark for new content
+            "oldest_seen": None,  # Bookmark for how far back we've gone
+            "threads": {},
+            "failed_urls": [],
+            "total_scraped": 0
+        }
     
     def save_progress(self, progress: Dict) -> None:
         """Save progress tracking data"""
@@ -596,60 +603,376 @@ class EcommerceFuelScraper:
             "last_activity": last_activity
         }
     
-    def scroll_and_collect_all_topics(self, page: Page, max_topics: int = 100) -> List[Dict]:
-        """Scroll through all topics via infinite scroll"""
-        all_topics = []
-        seen_urls = set()
-        no_new_content_count = 0
+    def extract_visible_topics(self, page: Page) -> List[Dict]:
+        """Get all topics currently visible on page"""
+        topics = []
+        rows = page.locator('tbody tr').all()
         
-        while len(all_topics) < max_topics:
-            # Get current topics
-            rows = page.locator('tbody tr').all()
-            new_topics_count = 0
+        for row in rows:
+            try:
+                topic = self.extract_topic_from_row(row)
+                topics.append(topic)
+            except Exception as e:
+                logger.warning(f"Failed to extract topic: {e}")
+        
+        return topics
+    
+    def needs_scraping(self, topic: Dict, progress: Dict) -> bool:
+        """Check if topic needs to be scraped"""
+        thread_info = progress["threads"].get(topic["url"], {})
+        
+        # Never scraped
+        if "last_scraped" not in thread_info:
+            return True
+        
+        # Activity changed
+        previous_activity = thread_info.get("last_activity")
+        return previous_activity != topic["last_activity"]
+    
+    def scroll_for_more(self, page: Page) -> bool:
+        """Scroll and wait for new content"""
+        initial_count = len(page.locator('tbody tr').all())
+        
+        # Scroll to bottom
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        
+        # Wait for loading
+        loader = page.locator('.loading-container')
+        if loader.is_visible():
+            try:
+                loader.wait_for(state='hidden', timeout=10000)
+            except:
+                logger.warning("Loading timeout")
+        else:
+            page.wait_for_timeout(2000)
+        
+        # Check if we got new content
+        new_count = len(page.locator('tbody tr').all())
+        return new_count > initial_count
+    
+    def update_bookmarks(self, topics: List[Dict], progress: Dict) -> None:
+        """Update our position bookmarks"""
+        if not topics:
+            return
+        
+        # Update newest if this is newer (or first run)
+        if not progress['newest_seen']:
+            progress['newest_seen'] = {
+                "url": topics[0]['url'],
+                "last_activity": topics[0]['last_activity'],
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Always update oldest as we scroll backwards
+        progress['oldest_seen'] = {
+            "url": topics[-1]['url'],
+            "last_activity": topics[-1]['last_activity'],
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    def scroll_to_topic(self, page: Page, target_url: str) -> bool:
+        """Scroll until we find a specific topic"""
+        max_scrolls = 50
+        scrolls = 0
+        
+        logger.info(f"Scrolling to find bookmark: {target_url}")
+        
+        while scrolls < max_scrolls:
+            topics = self.extract_visible_topics(page)
             
-            for row in rows:
-                try:
-                    topic = self.extract_topic_from_row(row)
-                    if topic['url'] not in seen_urls:
-                        seen_urls.add(topic['url'])
-                        all_topics.append(topic)
-                        new_topics_count += 1
-                except Exception as e:
-                    logger.warning(f"Failed to extract topic: {e}")
+            # Check if target is visible
+            for topic in topics:
+                if topic['url'] == target_url:
+                    logger.info(f"Found bookmark after {scrolls} scrolls")
+                    return True
             
-            logger.info(f"Collected {len(all_topics)} topics total ({new_topics_count} new)")
+            # Scroll for more
+            if not self.scroll_for_more(page):
+                logger.warning("Reached end without finding bookmark")
+                return False
             
-            # Stop if we hit the limit
-            if len(all_topics) >= max_topics:
-                logger.info(f"Reached topic limit of {max_topics}")
+            scrolls += 1
+        
+        logger.warning(f"Bookmark not found after {max_scrolls} scrolls")
+        return False
+    
+    
+    # ==================== PHASE 4: Individual Thread Scraping ====================
+    
+    def url_to_filename(self, url: str) -> str:
+        """Convert thread URL to safe filename"""
+        # Extract ID and slug from URL like /t/some-thread/12345
+        parts = url.strip('/').split('/')
+        if len(parts) >= 3:
+            thread_id = parts[-1]
+            thread_slug = parts[-2]
+            return f"t_{thread_id}_{thread_slug}.json"
+        return f"thread_{url.replace('/', '_')}.json"
+    
+    def extract_post_author(self, post_elem) -> Dict:
+        """Extract author info from a post element"""
+        author = {
+            "username": "",
+            "display_name": "",
+            "avatar_url": ""
+        }
+        
+        try:
+            # Username from data-user-card
+            user_link = post_elem.locator('a[data-user-card]').first
+            if user_link.count() > 0:
+                author["username"] = user_link.get_attribute('data-user-card') or ""
+                author["display_name"] = user_link.text_content().strip()
+            
+            # Avatar
+            avatar = post_elem.locator('img.avatar').first
+            if avatar.count() > 0:
+                author["avatar_url"] = avatar.get_attribute('src') or ""
+                
+        except Exception as e:
+            logger.warning(f"Error extracting author: {e}")
+            
+        return author
+    
+    def extract_post_data(self, post_elem, index: int) -> Dict:
+        """Extract data from a single post"""
+        post = {
+            "index": index,
+            "author": {},
+            "content_html": "",
+            "content_text": "",
+            "timestamp": "",
+            "likes": 0,
+            "is_original": index == 0
+        }
+        
+        try:
+            # Author
+            post["author"] = self.extract_post_author(post_elem)
+            
+            # Content
+            content = post_elem.locator('.cooked').first
+            if content.count() > 0:
+                post["content_html"] = content.inner_html()
+                post["content_text"] = content.text_content().strip()
+            
+            # Timestamp
+            time_elem = post_elem.locator('time').first
+            if time_elem.count() > 0:
+                post["timestamp"] = time_elem.get_attribute('datetime') or ""
+            
+            # Likes - look for like button with count
+            like_button = post_elem.locator('button.like-count').first
+            if like_button.count() > 0:
+                like_text = like_button.text_content().strip()
+                if like_text.isdigit():
+                    post["likes"] = int(like_text)
+                    
+        except Exception as e:
+            logger.warning(f"Error extracting post data: {e}")
+            
+        return post
+    
+    def scrape_thread(self, page: Page, topic_data: Dict) -> Dict:
+        """Scrape a complete thread"""
+        url = topic_data['url']
+        full_url = f"{self.base_url}{url}"
+        
+        logger.info(f"Scraping thread: {topic_data['title'][:50]}...")
+        page.goto(full_url)
+        page.wait_for_load_state('domcontentloaded')
+        page.wait_for_timeout(2000)
+        
+        # Start with topic data from phase 3
+        thread_data = {
+            "url": url,
+            "title": topic_data['title'],
+            "category": topic_data['category'],
+            "tags": topic_data['tags'],
+            "author": {"username": topic_data['author']},
+            "stats": {
+                "replies": topic_data['replies'],
+                "views": topic_data['views'],
+                "last_activity": topic_data['last_activity']
+            },
+            "posts": [],
+            "scraped_at": datetime.now().isoformat()
+        }
+        
+        try:
+            # Get all posts
+            posts = page.locator('article.onscreen-post').all()
+            logger.info(f"Found {len(posts)} posts")
+            
+            for i, post_elem in enumerate(posts):
+                post_data = self.extract_post_data(post_elem, i)
+                thread_data["posts"].append(post_data)
+                
+                # First post author is thread author with more details
+                if i == 0 and post_data["author"]["username"]:
+                    thread_data["author"] = post_data["author"]
+                    thread_data["created_at"] = post_data["timestamp"]
+            
+            # Update reply count (total posts - 1)
+            thread_data["stats"]["replies"] = len(posts) - 1
+            
+        except Exception as e:
+            logger.error(f"Error scraping thread content: {e}")
+            
+        return thread_data
+    
+    def save_thread(self, thread_data: Dict) -> None:
+        """Save thread data to disk"""
+        filename = self.url_to_filename(thread_data['url'])
+        filepath = self.posts_dir / filename
+        with open(filepath, 'w') as f:
+            json.dump(thread_data, f, indent=2)
+        logger.info(f"Saved: {filename}")
+    
+    def scrape_new_content(self, page: Page, progress: Dict, max_topics: int) -> int:
+        """Phase 1: Check for new content since last run"""
+        if not progress['newest_seen']:
+            return 0
+        
+        logger.info(f"Checking for new content since: {progress['newest_seen']['url']}")
+        page.goto(f"{self.base_url}/latest")
+        page.wait_for_load_state('domcontentloaded')
+        page.wait_for_timeout(3000)
+        
+        new_count = 0
+        newest_url = progress['newest_seen']['url']
+        found_bookmark = False
+        
+        while not found_bookmark:
+            topics = self.extract_visible_topics(page)
+            
+            for topic in topics:
+                # Stop when we reach our bookmark
+                if topic['url'] == newest_url:
+                    found_bookmark = True
+                    break
+                
+                # Process new topic
+                if self.needs_scraping(topic, progress):
+                    thread_page = page.context.new_page()
+                    try:
+                        thread_data = self.scrape_thread(thread_page, topic)
+                        self.save_thread(thread_data)
+                        
+                        # Update progress
+                        progress['threads'][topic['url']] = {
+                            'last_scraped': datetime.now().isoformat(),
+                            'last_activity': topic['last_activity'],
+                            'reply_count': topic['replies']
+                        }
+                        progress['total_scraped'] += 1
+                        new_count += 1
+                        
+                        if new_count >= max_topics:
+                            found_bookmark = True
+                            break
+                    finally:
+                        thread_page.close()
+            
+            if found_bookmark:
                 break
             
-            # Check if we got new content
-            if new_topics_count == 0:
-                no_new_content_count += 1
-                if no_new_content_count >= 3:
-                    logger.info("No new content after 3 scrolls - reached end")
-                    break
-            else:
-                no_new_content_count = 0
-            
-            # Scroll to bottom
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            
-            # Wait for loading indicator
-            loader = page.locator('.loading-container')
-            if loader.is_visible():
-                loader.wait_for(state='hidden', timeout=10000)
-            else:
-                page.wait_for_timeout(2000)
+            # Try to scroll for more
+            if not self.scroll_for_more(page):
+                logger.warning("Reached end without finding newest bookmark")
+                break
         
-        return all_topics
+        # Update newest bookmark
+        if new_count > 0:
+            first_topic = self.extract_visible_topics(page)[0]
+            progress['newest_seen'] = {
+                "url": first_topic['url'],
+                "last_activity": first_topic['last_activity'],
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        return new_count
     
-    def run_phase3(self) -> None:
-        """Phase 3: Collect all topics and determine what needs scraping"""
+    def scrape_backwards(self, page: Page, progress: Dict, max_topics: int) -> int:
+        """Phase 2: Continue scraping backwards from bookmark"""
+        if progress['oldest_seen']:
+            logger.info(f"Resuming from: {progress['oldest_seen']['url']}")
+            if not self.scroll_to_topic(page, progress['oldest_seen']['url']):
+                logger.warning("Could not find bookmark, starting from latest")
+                page.goto(f"{self.base_url}/latest")
+        else:
+            logger.info("Starting fresh from latest topics")
+            page.goto(f"{self.base_url}/latest")
+        
+        page.wait_for_load_state('domcontentloaded')
+        page.wait_for_timeout(3000)
+        
+        scraped_count = 0
+        seen_in_session = set()
+        
+        while scraped_count < max_topics:
+            topics = self.extract_visible_topics(page)
+            
+            if not topics:
+                logger.warning("No topics found")
+                break
+            
+            # Update bookmarks
+            self.update_bookmarks(topics, progress)
+            
+            for topic in topics:
+                if topic['url'] in seen_in_session:
+                    continue
+                seen_in_session.add(topic['url'])
+                
+                if self.needs_scraping(topic, progress):
+                    thread_page = page.context.new_page()
+                    try:
+                        thread_data = self.scrape_thread(thread_page, topic)
+                        self.save_thread(thread_data)
+                        
+                        # Update progress
+                        progress['threads'][topic['url']] = {
+                            'last_scraped': datetime.now().isoformat(),
+                            'last_activity': topic['last_activity'],
+                            'reply_count': topic['replies']
+                        }
+                        progress['total_scraped'] += 1
+                        scraped_count += 1
+                        
+                        if scraped_count >= max_topics:
+                            break
+                    except Exception as e:
+                        logger.error(f"Failed to scrape {topic['url']}: {e}")
+                        if topic['url'] not in progress['failed_urls']:
+                            progress['failed_urls'].append(topic['url'])
+                    finally:
+                        thread_page.close()
+            
+            # Save progress periodically
+            self.save_progress(progress)
+            
+            # Continue scrolling
+            if not self.scroll_for_more(page):
+                logger.info("Reached end of forum")
+                break
+        
+        return scraped_count
+    
+    def run_streaming(self, max_topics: int = 10) -> None:
+        """Main streaming scraper with time-based cursors"""
         print("\n" + "="*60)
-        print("PHASE 3: Topic List Scraping with Progress Tracking")
+        print("ECOMMERCEFUEL FORUM SCRAPER - STREAMING MODE")
         print("="*60)
+        
+        # Load progress
+        progress = self.load_progress()
+        print(f"\n📊 Progress loaded:")
+        print(f"   Total scraped: {progress['total_scraped']}")
+        if progress['newest_seen']:
+            print(f"   Newest seen: {progress['newest_seen']['last_activity']} ago")
+        if progress['oldest_seen']:
+            print(f"   Oldest seen: {progress['oldest_seen']['last_activity']} ago")
         
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=False)
@@ -661,69 +984,48 @@ class EcommerceFuelScraper:
                 browser.close()
                 return
             
-            page = context.new_page()
+            # Main page for topic list
+            main_page = context.new_page()
             
-            # Navigate to forum
-            logger.info("Navigating to forum...")
-            page.goto(f"{self.base_url}/latest")
-            page.wait_for_load_state('domcontentloaded')
-            page.wait_for_timeout(3000)  # Let the content settle
-            
-            # Load progress data
-            progress = self.load_progress()
-            print(f"\n📊 Loaded progress: {len(progress['threads'])} threads tracked")
-            
-            # Collect all topics
-            print("\n🔄 Starting topic collection via infinite scroll (max 100 topics)...")
-            all_topics = self.scroll_and_collect_all_topics(page, max_topics=100)
-            print(f"\n✅ Collected {len(all_topics)} topics (limited to 100 for testing)")
-            
-            # Determine what needs scraping
-            topics_to_scrape = []
-            topics_to_skip = []
-            
-            for topic in all_topics:
-                thread_data = progress["threads"].get(topic['url'], {})
-                previous_activity = thread_data.get("last_activity")
-                
-                if previous_activity is None or previous_activity != topic['last_activity']:
-                    topics_to_scrape.append(topic)
-                    reason = "new" if previous_activity is None else f"updated ({previous_activity} → {topic['last_activity']})"
-                    logger.info(f"Need to scrape: {topic['title'][:50]}... ({reason})")
+            try:
+                # Phase 1: Check for new content
+                print("\n📍 Phase 1: Checking for new content...")
+                new_count = self.scrape_new_content(main_page, progress, max_topics)
+                if new_count > 0:
+                    print(f"   ✅ Scraped {new_count} new topics")
                 else:
-                    topics_to_skip.append(topic)
-            
-            # Update progress with current state
-            for topic in all_topics:
-                if topic['url'] not in progress["threads"]:
-                    progress["threads"][topic['url']] = {}
-                progress["threads"][topic['url']]["last_activity"] = topic['last_activity']
-                progress["threads"][topic['url']]["reply_count"] = topic['replies']
-            
-            # Save progress
-            self.save_progress(progress)
-            
-            # Summary
-            print("\n" + "="*60)
-            print("PHASE 3 SUMMARY")
-            print("="*60)
-            print(f"Total topics found: {len(all_topics)}")
-            print(f"Topics needing scrape: {len(topics_to_scrape)}")
-            print(f"Topics up-to-date: {len(topics_to_skip)}")
-            print(f"\nProgress saved to: {self.progress_file}")
-            
-            if topics_to_scrape:
-                print(f"\nFirst 5 topics to scrape:")
-                for topic in topics_to_scrape[:5]:
-                    print(f"  - {topic['title'][:60]}...")
-                    print(f"    Author: {topic['author']}, Last activity: {topic['last_activity']}")
-            
-            browser.close()
-        
-        print("\n" + "="*60)
-        print("PHASE 3 COMPLETE!")
-        print("="*60)
-        print("\nNext: Implement individual thread scraping in Phase 4")
+                    print(f"   ✅ No new content found")
+                
+                # Phase 2: Continue backwards
+                remaining = max_topics - new_count
+                if remaining > 0:
+                    print(f"\n📍 Phase 2: Continuing backwards (max {remaining} topics)...")
+                    backward_count = self.scrape_backwards(main_page, progress, remaining)
+                else:
+                    backward_count = 0
+                print(f"   ✅ Scraped {backward_count} topics")
+                
+                # Final save
+                self.save_progress(progress)
+                
+                # Summary
+                print("\n" + "="*60)
+                print("SCRAPING COMPLETE")
+                print("="*60)
+                print(f"New topics scraped: {new_count}")
+                print(f"Historical topics scraped: {backward_count}")
+                print(f"Total scraped all-time: {progress['total_scraped']}")
+                print(f"Failed URLs: {len(progress['failed_urls'])}")
+                
+                if progress['oldest_seen']:
+                    print(f"\nProgress bookmark: {progress['oldest_seen']['last_activity']} ago")
+                    print("Run again to continue from this point!")
+                
+            except Exception as e:
+                logger.error(f"Fatal error: {e}")
+                self.save_progress(progress)  # Save progress even on error
+            finally:
+                browser.close()
 
 
 if __name__ == "__main__":
@@ -731,19 +1033,28 @@ if __name__ == "__main__":
     
     scraper = EcommerceFuelScraper()
     
-    if len(sys.argv) > 1 and sys.argv[1] == "phase3":
-        scraper.run_phase3()
-    elif len(sys.argv) > 1 and sys.argv[1] == "phase2":
-        scraper.run_phase2()
-    elif len(sys.argv) > 1 and sys.argv[1] == "phase1":
-        scraper.run_phase1()
+    # Check for phase commands
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "phase1":
+            scraper.run_phase1()
+        elif sys.argv[1] == "phase2":
+            scraper.run_phase2()
+        elif sys.argv[1].isdigit():
+            # Run streaming scraper with topic limit
+            max_topics = int(sys.argv[1])
+            scraper.run_streaming(max_topics)
+        else:
+            print(f"\nUnknown command: {sys.argv[1]}")
+            print("Use 'phase1', 'phase2', or a number (e.g., 10) to scrape that many topics")
     else:
+        # Default: run streaming scraper
         print("\nEcommerceFuel Forum Scraper")
         print("="*30)
         print("\nUsage:")
-        print("  python ecommercefuel_scraper.py phase1  - Run Phase 1 (Browser & Cookies)")
-        print("  python ecommercefuel_scraper.py phase2  - Run Phase 2 (Structure Discovery)")
-        print("  python ecommercefuel_scraper.py phase3  - Run Phase 3 (Topic List Scraping)")
+        print("  python ecommercefuel_scraper.py         - Run streaming scraper (default 10 topics)")
+        print("  python ecommercefuel_scraper.py 20      - Run streaming scraper for 20 topics")
+        print("  python ecommercefuel_scraper.py phase1  - Initial setup (browser & cookies)")
+        print("  python ecommercefuel_scraper.py phase2  - Test forum structure")
         print("\nCurrent status:")
         print(f"  - Cookies: {'✅ Saved' if scraper.cookies_file.exists() else '❌ Not saved'}")
         print(f"  - Progress: {'✅ Exists' if scraper.progress_file.exists() else '❌ Not created'}")
@@ -751,3 +1062,6 @@ if __name__ == "__main__":
         
         if not scraper.cookies_file.exists():
             print("\n⚠️  Run phase1 first to set up browser and login")
+        else:
+            print("\n✅ Ready to scrape! Running default mode...")
+            scraper.run_streaming()
