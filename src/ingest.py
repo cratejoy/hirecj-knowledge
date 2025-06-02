@@ -170,9 +170,78 @@ class ContentProcessor:
     
     def process_inbox(self):
         """Process all items in inbox and resume any incomplete work"""
+        import gc
+        import tempfile
+        
         # First, check for stuck documents in LightRAG
         # TEMP: Disabled due to entity extraction errors blocking processing
         # self._check_pending_lightrag_docs()
+        
+        # Check for abandoned chunks that need transcribing
+        chunks_dirs = list((self.base_dir / 'chunks').glob('*'))
+        if chunks_dirs:
+            print(f"📂 Found {len(chunks_dirs)} item(s) with chunks to transcribe")
+            for chunks_dir in chunks_dirs:
+                try:
+                    item_id = chunks_dir.name
+                    print(f"\n🔄 Resuming: Transcribing chunks for {item_id}...")
+                    
+                    # Look for metadata in downloaded or audio directory
+                    metadata = {}
+                    metadata_paths = [
+                        self.base_dir / 'downloaded' / item_id / 'metadata.json',
+                        self.base_dir / 'audio' / item_id / 'metadata.json'
+                    ]
+                    
+                    for metadata_path in metadata_paths:
+                        if metadata_path.exists():
+                            with open(metadata_path) as f:
+                                metadata = json.load(f)
+                            break
+                    
+                    # Move to transcribing directory
+                    transcribing_dir = self.base_dir / 'transcribing' / item_id
+                    shutil.move(str(chunks_dir), str(transcribing_dir))
+                    
+                    # Transcribe chunks
+                    chunks = sorted(transcribing_dir.glob('chunk_*.mp3'))
+                    print(f"  🎙️ Found {len(chunks)} chunks to transcribe")
+                    
+                    transcripts = []
+                    for i, chunk in enumerate(chunks):
+                        print(f"  📝 Transcribing chunk {i+1}/{len(chunks)}: {chunk.name}")
+                        text = self._transcribe_chunk(chunk)
+                        print(f"     ✅ Received {len(text)} characters")
+                        transcripts.append(text)
+                    
+                    # Save transcript
+                    full_transcript = '\n'.join(transcripts)
+                    print(f"\n  📄 Total transcript length: {len(full_transcript):,} characters")
+                    
+                    enriched = f"""Title: {metadata.get('title', 'Unknown')}
+Feed: {metadata.get('feed_title', 'Unknown')}
+URL: {metadata.get('url', 'Unknown')}
+Date: {metadata.get('download_date', 'Unknown')}
+
+{full_transcript}
+"""
+                    
+                    transcript_file = self.base_dir / 'transcripts' / f"{item_id}.txt"
+                    transcript_file.write_text(enriched, encoding='utf-8')
+                    print(f"  💾 Saved transcript to: {transcript_file}")
+                    
+                    # Clean up
+                    shutil.rmtree(transcribing_dir)
+                    print(f"  🧹 Cleaned up chunks")
+                    
+                    # Force garbage collection
+                    gc.collect()
+                    
+                except Exception as e:
+                    print(f"  ❌ Failed to transcribe {item_id}: {str(e)}")
+                    # Move back to chunks to retry later
+                    if transcribing_dir.exists():
+                        shutil.move(str(transcribing_dir), str(chunks_dir))
         
         # Then check for transcripts that need loading
         transcripts_to_load = list((self.base_dir / 'transcripts').glob('*.txt'))
@@ -233,7 +302,7 @@ class ContentProcessor:
         inbox = self.base_dir / 'inbox'
         items = list(inbox.glob('*.json'))
         
-        if not items and not transcripts_to_load:
+        if not items and not transcripts_to_load and not chunks_dirs:
             print("No new items to process")
             # Don't return - let it continue to check other things
         
@@ -769,25 +838,57 @@ Date: {metadata.get('download_date', 'Unknown')}
     
     def _chunk_audio(self, audio_path: Path, output_dir: Path, max_size_mb: int = 10):
         """Split audio into chunks under 10MB for Whisper API"""
+        import gc
+        import tempfile
+        
         print(f"     Loading audio with pydub...")
-        audio = AudioSegment.from_mp3(audio_path)
         
-        duration_seconds = len(audio) / 1000
-        print(f"     Audio duration: {duration_seconds:.1f} seconds ({duration_seconds/60:.1f} minutes)")
+        # Set pydub temp directory to ensure cleanup
+        original_tempdir = tempfile.gettempdir()
+        temp_dir = tempfile.mkdtemp(prefix="pydub_")
+        tempfile.tempdir = temp_dir
         
-        # Calculate chunk duration for ~9MB chunks (safety margin)
-        bitrate = 128  # kbps
-        max_duration_ms = (max_size_mb * 8 * 1024) / bitrate * 1000
-        chunk_duration_minutes = max_duration_ms / 1000 / 60
-        print(f"     Max chunk duration: {chunk_duration_minutes:.1f} minutes per chunk")
-        
-        chunks = []
-        for i, start in enumerate(range(0, len(audio), int(max_duration_ms))):
-            chunk = audio[start:start + int(max_duration_ms)]
-            chunk_path = output_dir / f"chunk_{i:03d}.mp3"
-            print(f"     Creating chunk {i+1}: {start/1000:.1f}s - {(start + len(chunk))/1000:.1f}s")
-            chunk.export(chunk_path, format="mp3", bitrate="128k")
-            chunks.append(chunk_path)
+        try:
+            audio = AudioSegment.from_mp3(audio_path)
+            
+            duration_seconds = len(audio) / 1000
+            print(f"     Audio duration: {duration_seconds:.1f} seconds ({duration_seconds/60:.1f} minutes)")
+            
+            # Calculate chunk duration for ~9MB chunks (safety margin)
+            bitrate = 128  # kbps
+            max_duration_ms = (max_size_mb * 8 * 1024) / bitrate * 1000
+            chunk_duration_minutes = max_duration_ms / 1000 / 60
+            print(f"     Max chunk duration: {chunk_duration_minutes:.1f} minutes per chunk")
+            
+            chunks = []
+            for i, start in enumerate(range(0, len(audio), int(max_duration_ms))):
+                chunk = audio[start:start + int(max_duration_ms)]
+                chunk_path = output_dir / f"chunk_{i:03d}.mp3"
+                print(f"     Creating chunk {i+1}: {start/1000:.1f}s - {(start + len(chunk))/1000:.1f}s")
+                
+                # Export and immediately close any file handles
+                chunk.export(chunk_path, format="mp3", bitrate="128k")
+                
+                # Explicitly delete chunk to free memory
+                del chunk
+                
+                chunks.append(chunk_path)
+            
+            # Explicitly delete audio object
+            del audio
+            
+        finally:
+            # Restore original temp directory
+            tempfile.tempdir = original_tempdir
+            
+            # Clean up temp directory
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except:
+                pass
+            
+            # Force garbage collection to clean up any remaining references
+            gc.collect()
         
         return chunks
     
