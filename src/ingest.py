@@ -177,8 +177,55 @@ class ContentProcessor:
         # TEMP: Disabled due to entity extraction errors blocking processing
         # self._check_pending_lightrag_docs()
         
+        # Check for audio files that need chunking (failed chunking recovery)
+        audio_dirs = list((self.base_dir / 'audio').glob('*'))
+        chunks_dirs = list((self.base_dir / 'chunks').glob('*')) if (self.base_dir / 'chunks').exists() else []
+        transcribing_dirs = list((self.base_dir / 'transcribing').glob('*')) if (self.base_dir / 'transcribing').exists() else []
+        loaded_files = set(f.stem for f in (self.base_dir / 'loaded').glob('*.txt'))
+        
+        # Find audio files that haven't been processed yet
+        audio_to_process = []
+        for audio_dir in audio_dirs:
+            item_id = audio_dir.name
+            # Skip if already loaded, being transcribed, or has chunks
+            if (item_id not in loaded_files and 
+                not any(d.name == item_id for d in chunks_dirs) and
+                not any(d.name == item_id for d in transcribing_dirs)):
+                audio_to_process.append(audio_dir)
+        
+        if audio_to_process:
+            print(f"🎵 Found {len(audio_to_process)} audio file(s) to chunk and transcribe")
+            for audio_dir in audio_to_process:
+                try:
+                    item_id = audio_dir.name
+                    audio_file = audio_dir / 'audio.mp3'
+                    
+                    if not audio_file.exists():
+                        print(f"  ⚠️  No audio.mp3 found in {audio_dir}")
+                        continue
+                    
+                    print(f"\n🔄 Resuming: Processing audio for {item_id}...")
+                    
+                    # Look for metadata
+                    metadata = {}
+                    metadata_path = audio_dir / 'metadata.json'
+                    if not metadata_path.exists():
+                        # Try downloaded directory
+                        metadata_path = self.base_dir / 'downloaded' / item_id / 'metadata.json'
+                    
+                    if metadata_path.exists():
+                        with open(metadata_path) as f:
+                            metadata = json.load(f)
+                    
+                    # Process the audio file
+                    self._process_audio(audio_file, item_id, metadata)
+                    
+                except Exception as e:
+                    print(f"  ❌ Failed to process audio {item_id}: {str(e)}")
+                    self._move_to_failed(Path(f"{item_id}.json"), str(e))
+        
         # Check for abandoned chunks that need transcribing
-        chunks_dirs = list((self.base_dir / 'chunks').glob('*'))
+        chunks_dirs = list((self.base_dir / 'chunks').glob('*')) if (self.base_dir / 'chunks').exists() else []
         if chunks_dirs:
             print(f"📂 Found {len(chunks_dirs)} item(s) with chunks to transcribe")
             for chunks_dir in chunks_dirs:
