@@ -64,7 +64,7 @@ async def main():
                 print(f"\n[{i}/5] Loading: {filename}")
                 with open(filepath, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    await rag.ainsert(content)
+                    await rag.ainsert(content, file_paths=[filename])
         
         print("\nWaiting for knowledge graph to build...")
         await asyncio.sleep(10)

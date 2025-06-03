@@ -59,7 +59,7 @@ async def main():
     """
     
     print("\nInserting test content...")
-    await rag.ainsert(test_content)
+    await rag.ainsert(test_content, file_paths=["test_copywriting_guide.txt"])
     
     print("\nWaiting for processing...")
     await asyncio.sleep(5)

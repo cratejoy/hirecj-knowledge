@@ -29,10 +29,11 @@ async def load_transcript(transcript_path: str):
         llm_model_func=gpt_4o_mini_complete,
     )
     
-    # Insert content
-    print(f"Inserting {len(content)} characters...")
-    await rag.ainsert(content)
-    print("✅ Successfully loaded into LightRAG!")
+    # Insert content with file path for citations
+    filename = Path(transcript_path).name
+    print(f"Inserting {len(content)} characters from {filename}...")
+    await rag.ainsert(content, file_paths=[filename])
+    print("✅ Successfully loaded into LightRAG with source attribution!")
 
 
 if __name__ == "__main__":

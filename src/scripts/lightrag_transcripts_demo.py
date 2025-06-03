@@ -69,7 +69,7 @@ async def load_transcripts(rag, transcripts_dir):
             print(f"[{i}/{len(txt_files)}] Processing: {file_path.name}")
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-                await rag.ainsert(content)
+                await rag.ainsert(content, file_paths=[str(file_path)])
         except Exception as e:
             print(f"Error processing {file_path.name}: {e}")
     
